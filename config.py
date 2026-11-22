@@ -20,12 +20,14 @@ from typing import Optional
 #  Application constants
 # --------------------------------------------------------------------------- #
 APP_NAME = "SmaliX Desktop"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 IS_WIN = os.name == "nt"
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0  # hide console windows of child processes
 
 APP_DIR = Path.home() / ".smalix_desktop"
 CONFIG_FILE = APP_DIR / "config.json"
+AI_FILE = APP_DIR / "ai_settings.json"       # provider / model / steps (no secrets)
+AI_KEYS_FILE = APP_DIR / "ai_keys.json"      # fallback key store when no OS keyring is available
 WORK_ROOT = APP_DIR / "projects"
 DEBUG_KEYSTORE = APP_DIR / "smalix_debug.keystore"
 JADX_HOME = APP_DIR / "jadx"
@@ -208,3 +210,132 @@ class Tools:
         if p.lower().endswith(".jar"):
             return [self.require("java"), "-jar", p]
         return [p]
+
+
+# --------------------------------------------------------------------------- #
+#  AI assistant settings (provider, model, API keys)
+# --------------------------------------------------------------------------- #
+AI_PROVIDERS = {
+    "claude": {"label": "Claude (Anthropic)", "env": "ANTHROPIC_API_KEY", "model": "claude-sonnet-5-5"},
+    "gemini": {"label": "Gemini (Google)", "env": "GEMINI_API_KEY", "model": "gemini-2.5-flash"},
+    "openai": {"label": "ChatGPT (OpenAI)", "env": "OPENAI_API_KEY", "model": "gpt-4o"},
+}
+KEYRING_SERVICE = "smalix-desktop"
+
+
+class AISettings:
+    """
+    Non-secret settings live in ai_settings.json.  API keys are kept in the OS keyring
+    (Windows Credential Manager / macOS Keychain / Secret Service) when the optional
+    `keyring` package is installed; otherwise in ai_keys.json inside the user's app folder
+    (permissions 600 where supported).  Environment variables are a read-only last resort.
+    """
+
+    def __init__(self) -> None:
+        self.provider = "claude"
+        self.models: dict[str, str] = {}
+        self.max_steps = 8
+        self.last_folder = ""
+        self.load()
+
+    # -- plain settings ------------------------------------------------------
+    def load(self) -> None:
+        try:
+            if AI_FILE.exists():
+                d = json.loads(AI_FILE.read_text(encoding="utf-8"))
+                if d.get("provider") in AI_PROVIDERS:
+                    self.provider = d["provider"]
+                self.models = {k: v for k, v in d.get("models", {}).items() if k in AI_PROVIDERS and v}
+                self.max_steps = max(1, min(30, int(d.get("max_steps", 8))))
+                self.last_folder = str(d.get("last_folder", ""))
+        except Exception:
+            pass
+
+    def save(self) -> None:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        AI_FILE.write_text(json.dumps({"provider": self.provider, "models": self.models,
+                                       "max_steps": self.max_steps, "last_folder": self.last_folder},
+                                      indent=2), encoding="utf-8")
+
+    def model(self, provider: Optional[str] = None) -> str:
+        p = provider or self.provider
+        return self.models.get(p) or AI_PROVIDERS[p]["model"]
+
+    # -- API keys --------------------------------------------------------------
+    @staticmethod
+    def _keyring():
+        try:
+            import keyring
+            from keyring.backends import fail
+            if isinstance(keyring.get_keyring(), fail.Keyring):
+                return None
+            return keyring
+        except Exception:
+            return None
+
+    def _file_keys(self) -> dict:
+        try:
+            if AI_KEYS_FILE.exists():
+                return json.loads(AI_KEYS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _write_file_keys(self, data: dict) -> None:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        if not data:
+            AI_KEYS_FILE.unlink(missing_ok=True)
+            return
+        AI_KEYS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            os.chmod(AI_KEYS_FILE, 0o600)
+        except OSError:
+            pass
+
+    def get_key(self, provider: str) -> str:
+        kr = self._keyring()
+        if kr:
+            try:
+                v = kr.get_password(KEYRING_SERVICE, provider)
+                if v:
+                    return v
+            except Exception:
+                pass
+        v = self._file_keys().get(provider, "")
+        if v:
+            return v
+        return os.environ.get(AI_PROVIDERS[provider]["env"], "")
+
+    def set_key(self, provider: str, key: str) -> str:
+        """Store a key; returns 'keyring' or 'file' (where it ended up)."""
+        kr = self._keyring()
+        if kr:
+            try:
+                kr.set_password(KEYRING_SERVICE, provider, key)
+                data = self._file_keys()
+                if data.pop(provider, None) is not None:      # don't leave a stale plain-text copy
+                    self._write_file_keys(data)
+                return "keyring"
+            except Exception:
+                pass
+        data = self._file_keys()
+        data[provider] = key
+        self._write_file_keys(data)
+        return "file"
+
+    def delete_key(self, provider: str) -> None:
+        kr = self._keyring()
+        if kr:
+            try:
+                kr.delete_password(KEYRING_SERVICE, provider)
+            except Exception:
+                pass
+        data = self._file_keys()
+        if data.pop(provider, None) is not None:
+            self._write_file_keys(data)
+
+    def storage_note(self) -> str:
+        if self._keyring():
+            return "Keys are stored in your operating system's secure keyring."
+        return (f"Keys are stored in {AI_KEYS_FILE} (plain text, your user folder only). "
+                "Run 'pip install keyring' to use the OS secure keyring instead.")

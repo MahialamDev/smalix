@@ -23,8 +23,10 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from ai_actions import ProjectActions
+from ai_panel import AISettingsDialog, ChatPanel, SideBar
 from backend_worker import BackendWorker
-from config import APP_DIR, APP_NAME, APP_VERSION, C, Tools
+from config import APP_DIR, APP_NAME, APP_VERSION, WORK_ROOT, AISettings, C, Tools
 from smali_utils import (explain_line, flip_if_line, is_binary, parse_method_header, read_text,
                          return_patch_body, smali_class_name, smali_to_java_outline)
 from sync_mapper import map_java_to_smali
@@ -58,6 +60,9 @@ class SmaliXApp(ctk.CTk):
         self.random_var = tk.BooleanVar(value=False)
         self.sync_var = tk.BooleanVar(value=True)
         self._active_pane = None            # last focused editor pane (target of Ctrl+F)
+        self._chat_open = False
+        self.ai = AISettings()              # provider / model / API keys
+        self.ai_actions = ProjectActions(self)
 
         apply_styles(self)
         self._build_ui()
@@ -73,15 +78,35 @@ class SmaliXApp(ctk.CTk):
     def _build_ui(self) -> None:
         Header(self).pack(fill="x", padx=16, pady=(10, 0))
         self.toolbar = Toolbar(self, {
-            "open": self.cmd_open, "save": self.cmd_save, "rebuild": self.cmd_rebuild,
-            "sign": self.cmd_sign, "rebuild_sign": self.cmd_rebuild_sign, "clean": self.cmd_clean,
-            "about": self.cmd_about, "tools": self.cmd_tools, "search": self.cmd_search,
+            "open": self.cmd_open, "open_folder": self.cmd_open_folder, "save": self.cmd_save,
+            "rebuild": self.cmd_rebuild, "sign": self.cmd_sign, "rebuild_sign": self.cmd_rebuild_sign,
+            "clean": self.cmd_clean, "about": self.cmd_about, "tools": self.cmd_tools,
+            "search": self.cmd_search,
         }, self.fast_var, self.random_var, self.sync_var)
         self.toolbar.pack(fill="x", padx=16, pady=10)
 
-        self.vpane = tk.PanedWindow(self, orient="vertical", sashwidth=6, bg=C["bg"], bd=0,
+        # status bar first (side=bottom) so it never gets squeezed out by the expanding body
+        self.statusbar = StatusBar(self)
+        self.statusbar.pack(side="bottom", fill="x", padx=16, pady=(0, 6))
+
+        body = tk.Frame(self, bg=C["bg"])
+        body.pack(fill="both", expand=True)
+        self.sidebar = SideBar(body, {
+            "chat": self.toggle_chat, "open": self.cmd_open, "open_folder": self.cmd_open_folder,
+            "save": self.cmd_save, "rebuild": self.cmd_rebuild, "sign": self.cmd_sign,
+            "rebuild_sign": self.cmd_rebuild_sign, "clean": self.cmd_clean,
+            "search": lambda: self.toolbar.search_entry.focus_set(), "tools": self.cmd_tools,
+            "settings": self.cmd_ai_settings, "about": self.cmd_about,
+        })
+        self.sidebar.pack(side="right", fill="y", padx=(4, 12), pady=(0, 4))
+        self.main_area = tk.Frame(body, bg=C["bg"])
+        self.main_area.pack(side="left", fill="both", expand=True)
+        self.chat = ChatPanel(body, self, self.ai, self.ai_actions,
+                              on_settings=self.cmd_ai_settings, on_close=self.toggle_chat)   # shown by toggle_chat
+
+        self.vpane = tk.PanedWindow(self.main_area, orient="vertical", sashwidth=6, bg=C["bg"], bd=0,
                                     sashrelief="flat", opaqueresize=True)
-        self.vpane.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        self.vpane.pack(fill="both", expand=True, padx=(12, 4), pady=(0, 4))
         self.hpane = tk.PanedWindow(self.vpane, orient="horizontal", sashwidth=6, bg=C["bg"], bd=0,
                                     sashrelief="flat", opaqueresize=True)
         self.vpane.add(self.hpane, minsize=220, stretch="always")
@@ -117,9 +142,6 @@ class SmaliXApp(ctk.CTk):
         })
         self.vpane.add(self.tabs, minsize=140, stretch="never")
         self.tabs.select_tab("console")
-
-        self.statusbar = StatusBar(self)
-        self.statusbar.pack(fill="x", padx=16, pady=(0, 6))
 
     def _set_initial_sashes(self) -> None:
         try:
@@ -161,6 +183,7 @@ class SmaliXApp(ctk.CTk):
 
     def _on_busy(self, busy: bool, label: str) -> None:
         self.toolbar.set_busy(busy)
+        self.sidebar.set_busy(busy)
         self.configure(cursor="watch" if busy else "")
         if busy:
             self.set_status(label + " ...")
@@ -173,6 +196,7 @@ class SmaliXApp(ctk.CTk):
     def _on_close(self) -> None:
         if self._dirty() and not messagebox.askyesno(APP_NAME, "You have unsaved smali edits. Quit anyway?"):
             return
+        self.chat.shutdown()
         self.backend.close()
         self.destroy()
 
@@ -200,9 +224,28 @@ class SmaliXApp(ctk.CTk):
 
     def _need_project(self) -> bool:
         if not self.backend.proj or not self.backend.proj.exists():
-            messagebox.showinfo(APP_NAME, "Open an APK first.")
+            messagebox.showinfo(APP_NAME, "Open an APK or a decompiled folder first.")
             return False
         return True
+
+    def cmd_open_folder(self) -> None:
+        """Open an already decompiled (apktool output) folder - skips the decompile step."""
+        if self._dirty() and not messagebox.askyesno(APP_NAME, "Discard unsaved smali edits?"):
+            return
+        start = self.ai.last_folder if self.ai.last_folder and Path(self.ai.last_folder).is_dir() else (
+            str(WORK_ROOT) if WORK_ROOT.is_dir() else str(Path.home()))
+        path = filedialog.askdirectory(title="Open decompiled folder (apktool output)", initialdir=start,
+                                       mustexist=True)
+        if not path:
+            return
+        folder = Path(path)
+        self.ai.last_folder = str(folder.parent)
+        try:
+            self.ai.save()
+        except OSError:
+            pass
+        self._submit("Opening folder " + folder.name, lambda: self.backend.open_project(folder),
+                     self._on_decompiled)
 
     def cmd_open(self) -> None:
         if self._dirty() and not messagebox.askyesno(APP_NAME, "Discard unsaved smali edits?"):
@@ -280,6 +323,74 @@ class SmaliXApp(ctk.CTk):
                             f"{APP_NAME} v{APP_VERSION}\nAPK Decompiler & Smali Editor\n\n"
                             "Backends: apktool, zipalign, apksigner, jadx (optional)\n"
                             "Use only on apps you own or are authorised to analyse.")
+
+    # ------------------------------------------------------------------ #
+    #  AI assistant (right sidebar chat)
+    # ------------------------------------------------------------------ #
+    def toggle_chat(self) -> None:
+        if self._chat_open:
+            self.chat.pack_forget()
+        else:
+            self.chat.pack(side="right", fill="y", before=self.main_area, padx=(0, 8), pady=(0, 4))
+            self.chat.focus_input()
+        self._chat_open = not self._chat_open
+        self.sidebar.set_active("chat", self._chat_open)
+
+    def cmd_ai_settings(self) -> None:
+        AISettingsDialog(self, self.ai, on_saved=self.chat.refresh_header)
+
+    def ai_context(self, with_file: bool) -> str:
+        """Text block describing the open project / file; sent in front of the user's message."""
+        parts: list = []
+        proj = self.backend.proj
+        if proj and proj.exists():
+            parts.append(f"Project folder: {proj.name}  (package: {self.project_tree._package or 'unknown'})")
+            try:
+                top = sorted(p.name + ("/" if p.is_dir() else "") for p in proj.iterdir())[:40]
+                parts.append("Top level: " + ", ".join(top))
+            except OSError:
+                pass
+        else:
+            parts.append("No project is open yet.")
+        if proj and self.current_file:
+            try:
+                rel = self.current_file.relative_to(proj).as_posix()
+            except ValueError:
+                rel = str(self.current_file)
+            line = int(self.smali.text.index("insert").split(".")[0])
+            parts.append(f"Open file: {rel}  (cursor line {line})")
+            m = self.current_method()
+            if m:
+                parts.append(f"Cursor is inside method: {m['header']}  (lines {m['start']}-{m['end']})")
+            try:
+                sel = self._pane_for_focus().text.get("sel.first", "sel.last")
+                if sel.strip():
+                    parts.append("Selected text:\n" + sel[:4000])
+            except tk.TclError:
+                pass
+            if with_file:
+                content = self.smali.get_content()
+                note = "" if len(content) <= 40000 else "\n... (file cut at 40000 characters - use read_file for the rest)"
+                parts.append("Open file content (live editor text):\n" + content[:40000] + note)
+        return "<context>\n" + "\n".join(parts) + "\n</context>\n\n"
+
+    def ai_before_edit(self, path: Path) -> None:
+        """The AI is about to change `path` on disk: keep the person's unsaved edits first."""
+        if self.current_file == path and self._dirty():
+            self.cmd_save()
+
+    def ai_after_edit(self, path: Path) -> None:
+        """`path` changed on disk: reload it in the editor and drop stale caches."""
+        self._callers_cache.clear()
+        if self.current_file == path:
+            line = int(self.smali.text.index("insert").split(".")[0])
+            self.current_file = None
+            self.open_file(path, line=line)
+        elif self.backend.proj and self.backend.proj.exists():
+            self.project_tree.refresh_files()          # a new file may have been created
+
+    def ai_run_command(self, name: str) -> None:
+        {"rebuild": self.cmd_rebuild, "sign": self.cmd_sign, "rebuild_sign": self.cmd_rebuild_sign}[name]()
 
     def cmd_tools(self) -> None:
         def jadx() -> None:
@@ -567,7 +678,7 @@ class SmaliXApp(ctk.CTk):
         if not query:
             return
         if not self.backend.proj:
-            messagebox.showinfo(APP_NAME, "Open an APK first.")
+            messagebox.showinfo(APP_NAME, "Open an APK or a decompiled folder first.")
             return
         self.tabs.select_tab("search")
         self.tabs.search_entry.delete(0, "end")

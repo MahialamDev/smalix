@@ -279,6 +279,52 @@ class BackendWorker:
         self.post(self.on_status, f"Opened {apk.name}")
         return scan
 
+    def open_project(self, folder: Path) -> ScanResult:
+        """Open an already decompiled (apktool output) folder - no decompile step needed."""
+        folder = Path(folder)
+        if not folder.is_dir():
+            raise ToolError(f"Not a folder: {folder}")
+        if not any(d.is_dir() for d in folder.glob("smali*")):
+            # maybe the parent of a project: use it when it holds exactly one apktool project
+            subs = [d for d in folder.iterdir() if d.is_dir() and (d / "apktool.yml").exists()]
+            if len(subs) == 1:
+                folder = subs[0]
+            else:
+                raise ToolError("This is not a decompiled apktool folder (no 'smali' directory found). "
+                                "Select the folder that contains smali/, res/ and apktool.yml.")
+        self.log(f"=== OPEN FOLDER {folder} ===", "info")
+        if not (folder / "apktool.yml").exists():
+            self.log("Note: apktool.yml is missing - browsing and editing work, but Rebuild will fail.", "dim")
+
+        apk_name = ""
+        try:
+            m = re.search(r"^apkFileName:\s*(.+?)\s*$", (folder / "apktool.yml").read_text(
+                encoding="utf-8", errors="ignore"), re.M)
+            if m:
+                apk_name = m.group(1).strip().strip("'\"")
+        except OSError:
+            pass
+        apk_name = apk_name or (folder.name + ".apk")
+        self.apk_path, self.proj, self.last_built = folder.parent / apk_name, folder, None
+
+        built = sorted((folder / "dist").glob("*-smalix-rebuilt.apk")) if (folder / "dist").is_dir() else []
+        if built:
+            self.last_built = built[-1]
+        jdir = folder.parent / (self.apk_path.stem + "_jadx")
+        self.jadx_dir = jdir if (jdir / "sources").exists() else None
+
+        self.log("Scanning project ...", "dim")
+        scan = self.scan_project(folder)
+        if self.jadx_dir:
+            self.log(f"Using existing JADX output: {self.jadx_dir}", "dim")
+        elif self.tools.get("jadx") and self.apk_path.exists():
+            self.start_jadx()
+        else:
+            self.log("No JADX output for this folder - Java pane shows a smali-based outline "
+                     "(the original APK is needed next to the folder for JADX).", "dim")
+        self.post(self.on_status, f"Opened folder {folder.name}")
+        return scan
+
     def scan_project(self, proj: Path) -> ScanResult:
         classes: list = []
         n_methods = 0
@@ -432,7 +478,7 @@ class BackendWorker:
     def start_jadx(self) -> None:
         """Decompile to Java in the background; the UI is told when it finishes."""
         jadx = self.tools.get("jadx")
-        if not jadx or not self.apk_path or not self.proj:
+        if not jadx or not self.apk_path or not self.proj or not self.apk_path.exists():
             return
         apk, jdir = self.apk_path, self.proj.parent / (self.apk_path.stem + "_jadx")
         self.log("JADX is decompiling in the background - the Java pane updates when it finishes.", "info")

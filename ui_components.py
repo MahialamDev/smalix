@@ -88,6 +88,7 @@ class CodeText(tk.Text):
                 return None
             raise e
     
+    def toggle_fold(self, start_line: int, end_line: int) -> None:
         """VS Code স্টাইলে নির্দিষ্ট কোড ব্লক কোল্যাপ্স বা এক্সপান্ড করার ফাংশন"""
         tag_name = f"fold_{start_line}_{end_line}"
         ranges = self.tag_ranges(tag_name)
@@ -485,7 +486,7 @@ class Header(tk.Frame):
 
 
 class Toolbar(tk.Frame):
-    """commands keys: open save rebuild sign rebuild_sign clean about tools search(query)"""
+    """commands keys: open open_folder save rebuild sign rebuild_sign clean about tools search(query)"""
 
     def __init__(self, parent, commands: dict, fast_var: tk.BooleanVar, random_var: tk.BooleanVar,
                  sync_var: tk.BooleanVar) -> None:
@@ -504,6 +505,7 @@ class Toolbar(tk.Frame):
             return b
 
         add("open", "Open APK", C["teal"], "#17a898", "#05080f")
+        add("open_folder", "Open Folder", "#0b0e15", "#1b2230", C["accent"], border=True)
         add("save", "Save", "#0b0e15", "#1b2230", "#ffffff", border=True, lock=False)
         add("rebuild", "Rebuild", C["blue"], "#4673cc", "#ffffff")
         add("sign", "Sign - Align", C["purple"], "#8638b8", "#ffffff")
