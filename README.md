@@ -79,14 +79,21 @@ Python 3.11 or 3.12 is recommended for better third-party compatibility.
 
 ## Installation
 
-### 1. Clone the repository
+Choose one of these methods:
+
+- **Run from source:** use Python and the project files.
+- **Run the built application:** use `dist\main.exe` without installing Python.
+
+### Option A: Run from source
+
+#### 1. Clone the repository
 
 ```powershell
 git clone https://github.com/MahialamDev/smailx.git
 cd smailx
 ```
 
-### 2. Create a virtual environment
+#### 2. Create a virtual environment
 
 ```powershell
 py -3.12 -m venv .venv
@@ -102,7 +109,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 3. Install the optional keyring package
+#### 3. Install the optional keyring package
 
 The keyring package stores API keys in Windows Credential Manager:
 
@@ -112,11 +119,36 @@ pip install keyring
 
 Without `keyring`, API keys are stored in the fallback JSON file described below.
 
-### 4. Run the application
+#### 4. Configure external tools
+
+Open the application and use **Tools** to configure:
+
+- JDK `java`
+- JDK `keytool`
+- apktool executable or JAR
+- Android SDK `zipalign`
+- Android SDK `apksigner`
+- optional JADX executable
+
+#### 5. Start the application
 
 ```powershell
 python main.py
 ```
+
+### Option B: Run the already-built executable
+
+1. Open the project folder.
+2. Open the `dist` folder.
+3. Double-click `main.exe`.
+
+The executable starts with no Python command:
+
+```text
+dist\main.exe
+```
+
+The executable still requires JDK, apktool, Android SDK Build Tools, and any selected optional tools. Configure their paths from **Tools** after the app opens.
 
 ---
 
@@ -454,31 +486,120 @@ smailx/
 
 ## Build a Standalone Windows Executable
 
-Install PyInstaller:
+The following commands build the Windows executable with the existing `main.spec` configuration.
+
+### 1. Open PowerShell in the project folder
 
 ```powershell
-pip install pyinstaller
+cd "C:\Users\<username>\Desktop\Compailer"
 ```
 
-Build using the existing specification:
+Replace the path with the actual location of the repository.
+
+### 2. Activate the virtual environment
 
 ```powershell
-pyinstaller main.spec
+.\.venv\Scripts\Activate.ps1
+python --version
 ```
 
-The executable is created at:
+If the virtual environment is not created yet:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 3. Install PyInstaller
+
+```powershell
+python -m pip install pyinstaller
+```
+
+Verify the installation:
+
+```powershell
+python -m PyInstaller --version
+```
+
+### 4. Build using the existing specification
+
+```powershell
+python -m PyInstaller main.spec --noconfirm
+```
+
+This command:
+
+- reads the build settings from `main.spec`
+- bundles Python and application dependencies
+- creates a windowed application without a console
+- uses the project name `main`
+- writes temporary build files to `build\`
+- writes the executable to `dist\`
+
+### 5. Locate and run the executable
+
+After a successful build:
+
+```powershell
+Get-Item ".\dist\main.exe"
+.\dist\main.exe
+```
+
+Verified output location:
 
 ```text
 dist\main.exe
 ```
 
-Alternative one-file build:
+Verified executable size:
 
-```powershell
-pyinstaller --noconsole --onefile --name SmaliX main.py
+```text
+14.36 MB
 ```
 
-The resulting executable still requires external tools such as JDK, apktool, Android SDK Build Tools, and optionally JADX.
+### 6. Clean rebuild
+
+To remove previous build output before rebuilding:
+
+```powershell
+Remove-Item -Recurse -Force .\build -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force .\dist -ErrorAction SilentlyContinue
+python -m PyInstaller main.spec --noconfirm
+```
+
+Do not delete `main.spec`; it contains the executable build configuration.
+
+### Alternative direct build command
+
+To build without using `main.spec`:
+
+```powershell
+python -m PyInstaller --noconsole --onefile --name SmaliX main.py
+```
+
+The direct build creates:
+
+```text
+dist\SmaliX.exe
+```
+
+The existing `main.spec` build is recommended because it matches the current project configuration.
+
+### What is and is not bundled
+
+The executable includes Python and the application modules. It does not include or replace external Android tooling.
+
+Users still need to install or configure:
+
+- JDK
+- `keytool`
+- apktool
+- Android SDK `zipalign`
+- Android SDK `apksigner`
+- optional JADX
 
 ---
 
